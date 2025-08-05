@@ -1,3 +1,8 @@
+## 0.0.2
+
+* Bug resolved for blank notification at start.
+* Log cleanup.
+
 ## 0.0.1
 
 * Initial release 🎉

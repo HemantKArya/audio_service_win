@@ -1,6 +1,6 @@
 name: audio_service_win
 description: "Platform interface allows you to use `audio_service` on Windows."
-version: 0.0.1
+version: 0.0.2
 homepage: https://github.com/HemantKArya/audio_service_win
 
 repository: https://github.com/HemantKArya/audio_service_win
