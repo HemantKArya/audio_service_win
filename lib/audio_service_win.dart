@@ -39,7 +39,6 @@ class AudioServiceWin extends AudioServicePlatform {
       'album': request.mediaItem.album,
       'artUri': request.mediaItem.artUri.toString(),
     });
-    log('Media artURI: ${request.mediaItem.artUri.toString()}');
   }
 
   @override
