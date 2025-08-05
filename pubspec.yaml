@@ -3,9 +3,7 @@ description: "Platform interface allows you to use `audio_service` on Windows."
 version: 0.0.1
 homepage: https://github.com/HemantKArya/audio_service_win
 
-repository:
-  type: git
-  url: https://github.com/HemantKArya/audio_service_win
+repository: https://github.com/HemantKArya/audio_service_win
 environment:
   sdk: ^3.6.2
   flutter: '>=3.3.0'
