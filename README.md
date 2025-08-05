@@ -3,7 +3,7 @@
 <div align="center">
   <img src="assets/scrnshot1.png" alt="audio_service_win Windows SMTC Example" width="600"/>
   
-  <h1 align="center">🎵 audio_service_win</h1>
+  <h1 align="center"> audio_service_win</h1>
   
   <p align="center">
     <b>Windows System Media Transport Controls for <a href="https://pub.dev/packages/audio_service">audio_service</a></b>
