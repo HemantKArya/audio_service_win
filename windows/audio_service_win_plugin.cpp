@@ -18,11 +18,13 @@
 
 #include <memory>
 #include <sstream>
+#include <iostream>
 
 static winrt::Windows::Media::Playback::MediaPlayer mediaPlayer{nullptr};
 static winrt::Windows::Media::SystemMediaTransportControls smtc{nullptr};
 static winrt::Windows::Media::SystemMediaTransportControlsDisplayUpdater updater{nullptr};
 static std::unique_ptr<flutter::MethodChannel<>> channel;
+static std::string appId;
 
 namespace audio_service_win
 {
@@ -50,12 +52,82 @@ namespace audio_service_win
 
   AudioServiceWinPlugin::~AudioServiceWinPlugin() {}
 
-  void AudioServiceWinPlugin::HandleMethodCall(
+  // Function to setup System Media Transport Controls (SMTC)
+  static void SetupSMTC()
+  {
+    if (mediaPlayer == nullptr)
+    {
+      mediaPlayer = winrt::Windows::Media::Playback::MediaPlayer();
+      smtc = mediaPlayer.SystemMediaTransportControls();
+      updater = smtc.DisplayUpdater();
+      updater.AppMediaId(winrt::to_hstring(appId));
+
+      smtc.IsPlayEnabled(true);
+      smtc.IsPauseEnabled(true);
+      smtc.IsNextEnabled(true);
+      smtc.IsPreviousEnabled(true);
+      smtc.IsEnabled(false); // Keep disabled until setMediaItem
+
+      std::cout << "SMTC initialized with appid: " << appId << std::endl;
+
+      smtc.ButtonPressed([](auto const &, winrt::Windows::Media::SystemMediaTransportControlsButtonPressedEventArgs const &args)
+        {
+          std::string* method = new std::string;
+          switch (args.Button()) {
+          case winrt::Windows::Media::SystemMediaTransportControlsButton::Play:
+            *method = "play";
+            break;
+          case winrt::Windows::Media::SystemMediaTransportControlsButton::Pause:
+            *method = "pause";
+            break;
+          case winrt::Windows::Media::SystemMediaTransportControlsButton::Next:
+            *method = "next";
+            break;
+          case winrt::Windows::Media::SystemMediaTransportControlsButton::Previous:
+            *method = "previous";
+            break;
+          case winrt::Windows::Media::SystemMediaTransportControlsButton::Stop:
+            *method = "stop";
+            break;
+          case winrt::Windows::Media::SystemMediaTransportControlsButton::FastForward:
+            *method = "fastForward";
+            break;
+          case winrt::Windows::Media::SystemMediaTransportControlsButton::Rewind:
+            *method = "rewind";
+            break;
+          case winrt::Windows::Media::SystemMediaTransportControlsButton::Record:
+            *method = "record";
+            break;
+          case winrt::Windows::Media::SystemMediaTransportControlsButton::ChannelUp:
+            *method = "channelUp";
+            break;
+          case winrt::Windows::Media::SystemMediaTransportControlsButton::ChannelDown:
+            *method = "channelDown";
+            break;
+          default:
+            *method = "other";
+            break;
+          }
+          channel->InvokeMethod(
+            "onSMTCButtonPressed",
+            std::make_unique<flutter::EncodableValue>(*method)
+          );
+          delete method; // Clean up the dynamically allocated string
+        });
+    }
+  }
+
+} // namespace audio_service_win
+
+namespace audio_service_win
+{
+
+void AudioServiceWinPlugin::HandleMethodCall(
       const flutter::MethodCall<flutter::EncodableValue> &method_call,
       std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result)
   {
 
-    // Initialize System Media Transport Controls (SMTC)
+    // Initialize System Media Transport Controls (SMTC) but do NOT enable or update notification yet
     if (method_call.method_name().compare("initializeSMTC") == 0)
     {
       std::cout << "Starting SMTC..." << std::endl;
@@ -64,72 +136,9 @@ namespace audio_service_win
       const auto *arguments = std::get_if<flutter::EncodableMap>(method_call.arguments());
       if (arguments && arguments->find(flutter::EncodableValue("appid")) != arguments->end())
       {
-        auto appid = std::get<std::string>(arguments->at(flutter::EncodableValue("appid")));
+        appId = std::get<std::string>(arguments->at(flutter::EncodableValue("appid")));
 
-        if (mediaPlayer == nullptr)
-        {
-          mediaPlayer = winrt::Windows::Media::Playback::MediaPlayer();
-          smtc = mediaPlayer.SystemMediaTransportControls();
-          updater = smtc.DisplayUpdater();
-          updater.AppMediaId(winrt::to_hstring(appid));
-          updater.Type(winrt::Windows::Media::MediaPlaybackType::Music);
-
-          smtc.IsEnabled(false);
-          smtc.IsPlayEnabled(true);
-          smtc.IsPauseEnabled(true);
-          smtc.IsNextEnabled(true);
-          smtc.IsPreviousEnabled(true);
-          updater.Update();
-          std::cout << "SMTC initialized with appid: " << appid << std::endl;
-
-          smtc.ButtonPressed([](auto const &, winrt::Windows::Media::SystemMediaTransportControlsButtonPressedEventArgs const &args)
-                               {
-                        std::string* method = new std::string;
-
-                        switch (args.Button()) {
-                        case winrt::Windows::Media::SystemMediaTransportControlsButton::Play:
-                            *method = "play";
-                            break;
-                        case winrt::Windows::Media::SystemMediaTransportControlsButton::Pause:
-                            *method = "pause";
-                            break;
-                        case winrt::Windows::Media::SystemMediaTransportControlsButton::Next:
-                            *method = "next";
-                            break;
-                        case winrt::Windows::Media::SystemMediaTransportControlsButton::Previous:
-                            *method = "previous";
-                            break;
-                        case winrt::Windows::Media::SystemMediaTransportControlsButton::Stop:
-                            *method = "stop";
-                            break;
-                        case winrt::Windows::Media::SystemMediaTransportControlsButton::FastForward:
-                            *method = "fastForward";
-                            break;
-                        case winrt::Windows::Media::SystemMediaTransportControlsButton::Rewind:
-                            *method = "rewind";
-                            break;
-                        case winrt::Windows::Media::SystemMediaTransportControlsButton::Record:
-                            *method = "record";
-                            break;
-                        case winrt::Windows::Media::SystemMediaTransportControlsButton::ChannelUp:
-                            *method = "channelUp";
-                            break;
-                        case winrt::Windows::Media::SystemMediaTransportControlsButton::ChannelDown:
-                            *method = "channelDown";
-                            break;
-                        default:
-                            *method = "other";
-                            break;
-                        }
-
-                      
-                          channel->InvokeMethod(
-                            "onSMTCButtonPressed",
-                            std::make_unique<flutter::EncodableValue>(*method)
-                          );
-                          delete method; // Clean up the dynamically allocated string
-                        });
-        }
+        
         result->Success();
       }
       else
@@ -149,6 +158,12 @@ namespace audio_service_win
         auto title = std::get<std::string>(arguments->at(flutter::EncodableValue("title")));
         auto artist = std::get<std::string>(arguments->at(flutter::EncodableValue("artist")));
         auto album = std::get<std::string>(arguments->at(flutter::EncodableValue("album")));
+
+        // Ensure SMTC is initialized
+        if (!smtc)
+        {
+          SetupSMTC();
+        }
 
         std::string artUri;
         if (arguments->find(flutter::EncodableValue("artUri")) != arguments->end())
