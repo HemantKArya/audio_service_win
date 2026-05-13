@@ -34,6 +34,7 @@ add_library(${PLUGIN_NAME} SHARED
 # application-level CMakeLists.txt. This can be removed for plugins that want
 # full control over build settings.
 apply_standard_settings(${PLUGIN_NAME})
+target_compile_features(${PLUGIN_NAME} PUBLIC cxx_std_20)
 
 # Symbols are hidden by default to reduce the chance of accidental conflicts
 # between plugins. This should not be removed; any symbols that should be
@@ -85,6 +86,7 @@ add_executable(${TEST_RUNNER}
   ${PLUGIN_SOURCES}
 )
 apply_standard_settings(${TEST_RUNNER})
+target_compile_features(${TEST_RUNNER} PUBLIC cxx_std_20)
 target_include_directories(${TEST_RUNNER} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(${TEST_RUNNER} PRIVATE flutter_wrapper_plugin)
 target_link_libraries(${TEST_RUNNER} PRIVATE gtest_main gmock)
