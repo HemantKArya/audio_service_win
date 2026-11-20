@@ -1,3 +1,6 @@
+## 0.0.6
+* Fix Windows build error C2589 in 0.0.5 (`std::min` clashed with the `min` macro from `<windows.h>`).
+
 ## 0.0.5
 * Performance: `setState` no longer blocks the UI thread when called often. SMTC setters (status, buttons, rate) are only called when their value changes, and the timeline is only republished on a status/rate/duration change or a position jump (seek) of more than 1s. Previously every call made ~10 synchronous calls into the Windows shell, which could freeze apps that update playback state frequently.
 * Re-sending the same media item (e.g. once its duration is known) now only updates the duration instead of clearing metadata, reloading artwork and resetting the position to 0.

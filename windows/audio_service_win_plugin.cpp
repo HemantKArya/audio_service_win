@@ -188,8 +188,9 @@ static int64_t ExpectedPositionMs(std::chrono::steady_clock::time_point now)
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - cache.publishedAt).count();
     pos += static_cast<int64_t>(static_cast<double>(elapsed) * cache.timelineRate);
   }
-  if (cache.durationMs > 0) pos = std::min(pos, cache.durationMs);
-  return std::max<int64_t>(pos, 0);
+  // Parenthesized: <windows.h> defines min/max macros.
+  if (cache.durationMs > 0) pos = (std::min)(pos, cache.durationMs);
+  return (std::max)(pos, int64_t{0});
 }
 
 // Publishes the timeline only when it carries new information: first publish,
