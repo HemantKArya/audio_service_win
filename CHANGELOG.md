@@ -1,3 +1,8 @@
+## 0.0.4
+* sends duration, position and speed to GSMTC.
+* plugin listens for PlaybackPositionChangeRequested and calls seek.
+* Next, previous, stop, fast-forward and rewind are enabled only if the app's controls include them.
+* If you skip tracks quickly, a slow artwork load from the previous track is now discarded instead of overwriting the current one. A mutex now guards the metadata updates.
 ## 0.0.3
 * Local cover art support by @GerryDush
 * Crash fixed by @AfalpHy - Null data handling
