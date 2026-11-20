@@ -37,7 +37,7 @@ class AudioServiceWin extends AudioServicePlatform {
     final item = request.mediaItem;
     _durationMs = item.duration?.inMilliseconds ?? 0;
     final art = item.artUri;
-    await methodChannel.invokeMethod('setMediaItem', {
+    await _invoke('setMediaItem', {
       'title': item.title,
       'artist': item.artist,
       'album': item.album,
@@ -45,6 +45,16 @@ class AudioServiceWin extends AudioServicePlatform {
       'artUri': art?.toString(),
       'durationMs': _durationMs,
     });
+  }
+
+  /// SMTC failures are cosmetic (system overlay only) and must never break
+  /// playback, so they are logged rather than thrown into audio_service.
+  Future<void> _invoke(String method, Map<String, Object?> args) async {
+    try {
+      await methodChannel.invokeMethod(method, args);
+    } on PlatformException catch (e) {
+      log('$method failed: ${e.code} ${e.message}', name: 'audio_service_win');
+    }
   }
 
   @override
@@ -73,7 +83,7 @@ class AudioServiceWin extends AudioServicePlatform {
 
     final actions = s.systemActions;
     final controls = s.controls.map((c) => c.action).toSet();
-    await methodChannel.invokeMethod('updateState', {
+    await _invoke('updateState', {
       'state': state,
       'positionMs': positionMs,
       'durationMs': _durationMs,
@@ -99,7 +109,7 @@ class AudioServiceWin extends AudioServicePlatform {
   @override
   Future<void> stopService(StopServiceRequest request) async {
     _durationMs = 0;
-    await methodChannel.invokeMethod('updateState', {'state': 2});
+    await _invoke('updateState', {'state': 2});
   }
 
   Future<void> _setupMethodCallHandler() async {

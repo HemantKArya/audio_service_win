@@ -16,8 +16,11 @@
 #include <winrt/Windows.Storage.Streams.h>
 #include <winrt/base.h>
 
+#include <chrono>
+#include <cstdlib>
 #include <memory>
 #include <sstream>
+#include <string>
 #include <iostream>
 #include <fstream>  // std::ifstream
 #include <vector>   // std::vector
@@ -111,10 +114,50 @@ static winrt::Windows::Foundation::TimeSpan MsToTimeSpan(int64_t ms)
   return std::chrono::duration_cast<winrt::Windows::Foundation::TimeSpan>(std::chrono::milliseconds(ms < 0 ? 0 : ms));
 }
 
-// Publishes duration/position to GSMTC so apps like lyric tools can sync.
-static void UpdateTimeline(int64_t durationMs, int64_t positionMs)
+// ---- Applied-state cache -------------------------------------------------
+// Every SMTC setter is a cross-process call into the Windows shell, executed
+// synchronously on the platform (UI) thread. Apps may call setState many times
+// per second, so we remember what SMTC already shows and only call a setter
+// when its value actually changes. Accessed only on the platform thread.
+struct SmtcCache
 {
-  if (!smtc) return;
+  std::optional<bool> enabled;
+  std::optional<winrt::Windows::Media::MediaPlaybackStatus> status;
+  std::optional<bool> canPlay, canPause, canNext, canPrevious, canStop,
+      canFastForward, canRewind;
+  std::optional<double> rate;
+
+  // Timeline as last published, plus whether it was advancing at that time,
+  // so we can tell a real position jump (seek) from normal playback progress.
+  bool hasTimeline = false;
+  int64_t durationMs = 0;
+  int64_t positionMs = 0;
+  bool advancing = false;
+  double timelineRate = 1.0;
+  std::chrono::steady_clock::time_point publishedAt{};
+
+  // Metadata currently displayed (to tell a new track from a re-send).
+  bool hasMetadata = false;
+  std::string title, artist, album, artUri;
+};
+static SmtcCache cache;
+
+// A position differing from the extrapolated one by more than this is treated
+// as a discontinuity (seek, restart) and republished.
+static constexpr int64_t kTimelineDriftToleranceMs = 1000;
+
+template <typename T, typename Apply>
+static void SetIfChanged(std::optional<T> &slot, const T &value, Apply &&apply)
+{
+  if (slot.has_value() && *slot == value) return;
+  apply(value);
+  slot = value; // Only cached after the setter succeeded.
+}
+
+// Publishes duration/position to GSMTC so apps like lyric tools can sync.
+static bool UpdateTimeline(int64_t durationMs, int64_t positionMs)
+{
+  if (!smtc) return false;
   try
   {
     winrt::Windows::Media::SystemMediaTransportControlsTimelineProperties props;
@@ -126,11 +169,48 @@ static void UpdateTimeline(int64_t durationMs, int64_t positionMs)
     props.MaxSeekTime(MsToTimeSpan(durationMs));
     props.Position(MsToTimeSpan(positionMs));
     smtc.UpdateTimelineProperties(props);
+    return true;
   }
   catch (const winrt::hresult_error &e)
   {
     std::cerr << "Failed to update SMTC timeline: " << winrt::to_string(e.message()) << std::endl;
+    return false;
   }
+}
+
+// Where the published timeline is now, as consumers extrapolate it.
+static int64_t ExpectedPositionMs(std::chrono::steady_clock::time_point now)
+{
+  if (!cache.hasTimeline) return 0;
+  int64_t pos = cache.positionMs;
+  if (cache.advancing)
+  {
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - cache.publishedAt).count();
+    pos += static_cast<int64_t>(static_cast<double>(elapsed) * cache.timelineRate);
+  }
+  if (cache.durationMs > 0) pos = std::min(pos, cache.durationMs);
+  return std::max<int64_t>(pos, 0);
+}
+
+// Publishes the timeline only when it carries new information: first publish,
+// duration/rate/advancing change, or a position jump beyond the tolerance.
+static void PublishTimeline(int64_t durationMs, int64_t positionMs, bool advancing, double rate, bool force)
+{
+  const auto now = std::chrono::steady_clock::now();
+  if (durationMs < 0) durationMs = 0;
+  const bool changed = force || !cache.hasTimeline ||
+                       durationMs != cache.durationMs ||
+                       advancing != cache.advancing ||
+                       rate != cache.timelineRate ||
+                       std::llabs(positionMs - ExpectedPositionMs(now)) > kTimelineDriftToleranceMs;
+  if (!changed) return;
+  if (!UpdateTimeline(durationMs, positionMs)) return;
+  cache.hasTimeline = true;
+  cache.durationMs = durationMs;
+  cache.positionMs = positionMs;
+  cache.advancing = advancing;
+  cache.timelineRate = rate;
+  cache.publishedAt = now;
 }
 
 namespace audio_service_win
@@ -194,6 +274,8 @@ namespace audio_service_win
       updater = smtc.DisplayUpdater();
       updater.AppMediaId(winrt::to_hstring(appId));
 
+      // Fresh SMTC instance: nothing is applied yet.
+      cache = SmtcCache{};
       smtc.IsPlayEnabled(true);
       smtc.IsPauseEnabled(true);
       smtc.IsNextEnabled(true);
@@ -335,11 +417,34 @@ namespace audio_service_win
           }
         }
 
+        const int64_t durationMs = GetInt(arguments, "durationMs", 0);
+
+        // Same item re-sent (commonly once its duration becomes known): keep
+        // the displayed metadata/artwork and the current position; only the
+        // duration may change. Rebuilding would flicker the artwork and reset
+        // the timeline to 0 mid-track.
+        if (updater && cache.hasMetadata && cache.title == title &&
+            cache.artist == artist && cache.album == album && cache.artUri == artUri)
+        {
+          try
+          {
+            PublishTimeline(durationMs, ExpectedPositionMs(std::chrono::steady_clock::now()),
+                            cache.advancing, cache.timelineRate, false);
+          }
+          catch (const winrt::hresult_error &e)
+          {
+            std::cerr << "Failed to update SMTC duration: " << winrt::to_string(e.message()) << std::endl;
+          }
+          result->Success();
+          return;
+        }
+
         if (updater)
+        try
         {
           metadataGeneration++;
           std::lock_guard<std::mutex> lock(updaterMutex);
-          smtc.IsEnabled(true);
+          SetIfChanged(cache.enabled, true, [](bool v) { smtc.IsEnabled(v); });
           updater.ClearAll();
           updater.Type(winrt::Windows::Media::MediaPlaybackType::Music);
           updater.MusicProperties().Title(winrt::to_hstring(title));
@@ -388,8 +493,20 @@ namespace audio_service_win
             }
           }
           updater.Update();
+          cache.hasMetadata = true;
+          cache.title = title;
+          cache.artist = artist;
+          cache.album = album;
+          cache.artUri = artUri;
           // New track: reset the timeline to 0 with the new duration (0 = unknown).
-          UpdateTimeline(GetInt(arguments, "durationMs", 0), 0);
+          PublishTimeline(durationMs, 0, cache.advancing, cache.timelineRate, true);
+        }
+        catch (const winrt::hresult_error &e)
+        {
+          // Metadata may be partially applied: forget it so a re-send rebuilds.
+          cache.hasMetadata = false;
+          result->Error("SMTCError", winrt::to_string(e.message()));
+          return;
         }
         result->Success();
       }
@@ -412,52 +529,64 @@ namespace audio_service_win
         }
         if (smtc)
         {
-          switch (state)
+          using Status = winrt::Windows::Media::MediaPlaybackStatus;
+          try
           {
-          case 0: // Playing
-            smtc.IsEnabled(true);
-            smtc.PlaybackStatus(winrt::Windows::Media::MediaPlaybackStatus::Playing);
-            break;
-          case 1: // Paused
-            smtc.IsEnabled(true);
-            smtc.PlaybackStatus(winrt::Windows::Media::MediaPlaybackStatus::Paused);
-            break;
-          case 3: // Loading / buffering
-            smtc.IsEnabled(true);
-            smtc.PlaybackStatus(winrt::Windows::Media::MediaPlaybackStatus::Changing);
-            break;
-          case 2: // Stopped
-            metadataGeneration++;
+            Status status;
+            switch (state)
             {
-              std::lock_guard<std::mutex> lock(updaterMutex);
-              smtc.PlaybackStatus(winrt::Windows::Media::MediaPlaybackStatus::Stopped);
-              UpdateTimeline(0, 0);
-              smtc.IsEnabled(false);
-              updater.ClearAll();
-              updater.Update();
+            case 0: status = Status::Playing; break;
+            case 1: status = Status::Paused; break;
+            case 3: status = Status::Changing; break; // Loading / buffering
+            case 2: // Stopped
+              metadataGeneration++;
+              {
+                std::lock_guard<std::mutex> lock(updaterMutex);
+                smtc.PlaybackStatus(Status::Stopped);
+                UpdateTimeline(0, 0);
+                smtc.IsEnabled(false);
+                updater.ClearAll();
+                updater.Update();
+              }
+              // Everything was cleared; the next update must reapply it all.
+              cache = SmtcCache{};
+              result->Success();
+              return;
+            default:
+              result->Error("InvalidArguments", "Invalid playback state");
+              return;
             }
-            result->Success();
-            return;
-          default:
-            result->Error("InvalidArguments", "Invalid playback state");
-            return;
+
+            SetIfChanged(cache.enabled, true, [](bool v) { smtc.IsEnabled(v); });
+            SetIfChanged(cache.status, status, [](Status v) { smtc.PlaybackStatus(v); });
+
+            // Enabled buttons reflect what the app actually supports.
+            SetIfChanged(cache.canPlay, GetBool(arguments, "canPlay", true), [](bool v) { smtc.IsPlayEnabled(v); });
+            SetIfChanged(cache.canPause, GetBool(arguments, "canPause", true), [](bool v) { smtc.IsPauseEnabled(v); });
+            SetIfChanged(cache.canNext, GetBool(arguments, "canNext", true), [](bool v) { smtc.IsNextEnabled(v); });
+            SetIfChanged(cache.canPrevious, GetBool(arguments, "canPrevious", true), [](bool v) { smtc.IsPreviousEnabled(v); });
+            SetIfChanged(cache.canStop, GetBool(arguments, "canStop", false), [](bool v) { smtc.IsStopEnabled(v); });
+            SetIfChanged(cache.canFastForward, GetBool(arguments, "canFastForward", false), [](bool v) { smtc.IsFastForwardEnabled(v); });
+            SetIfChanged(cache.canRewind, GetBool(arguments, "canRewind", false), [](bool v) { smtc.IsRewindEnabled(v); });
+
+            double speed = GetDouble(arguments, "speed", 1.0);
+            if (speed > 0.0)
+            {
+              SetIfChanged(cache.rate, speed, [](double v) { smtc.PlaybackRate(v); });
+            }
+            const double rate = cache.rate.value_or(1.0);
+
+            if (arguments->find(flutter::EncodableValue("positionMs")) != arguments->end())
+            {
+              PublishTimeline(GetInt(arguments, "durationMs", 0), GetInt(arguments, "positionMs", 0),
+                              status == Status::Playing, rate, false);
+            }
           }
-
-          // Enabled buttons reflect what the app actually supports.
-          smtc.IsPlayEnabled(GetBool(arguments, "canPlay", true));
-          smtc.IsPauseEnabled(GetBool(arguments, "canPause", true));
-          smtc.IsNextEnabled(GetBool(arguments, "canNext", true));
-          smtc.IsPreviousEnabled(GetBool(arguments, "canPrevious", true));
-          smtc.IsStopEnabled(GetBool(arguments, "canStop", false));
-          smtc.IsFastForwardEnabled(GetBool(arguments, "canFastForward", false));
-          smtc.IsRewindEnabled(GetBool(arguments, "canRewind", false));
-
-          double speed = GetDouble(arguments, "speed", 1.0);
-          if (speed > 0.0) smtc.PlaybackRate(speed);
-
-          if (arguments->find(flutter::EncodableValue("positionMs")) != arguments->end())
+          catch (const winrt::hresult_error &e)
           {
-            UpdateTimeline(GetInt(arguments, "durationMs", 0), GetInt(arguments, "positionMs", 0));
+            // A failed setter is not cached, so it is retried on the next call.
+            result->Error("SMTCError", winrt::to_string(e.message()));
+            return;
           }
         }
         result->Success();
