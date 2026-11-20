@@ -29,35 +29,65 @@ class AudioServiceWin extends AudioServicePlatform {
         {'appid': request.config.androidNotificationChannelId});
   }
 
+  /// Duration of the current item in ms (0 = unknown/live).
+  int _durationMs = 0;
+
   @override
   Future<void> setMediaItem(SetMediaItemRequest request) async {
-    log('Set Media Item in AudioServiceWin.', name: 'audio_service_win');
-
+    final item = request.mediaItem;
+    _durationMs = item.duration?.inMilliseconds ?? 0;
+    final art = item.artUri;
     await methodChannel.invokeMethod('setMediaItem', {
-      'title': request.mediaItem.title,
-      'artist': request.mediaItem.artist,
-      'album': request.mediaItem.album,
-      'artUri': request.mediaItem.artUri.toString(),
+      'title': item.title,
+      'artist': item.artist,
+      'album': item.album,
+      // Avoid sending the literal string "null" for missing artwork.
+      'artUri': art?.toString(),
+      'durationMs': _durationMs,
     });
   }
 
   @override
   Future<void> setState(SetStateRequest request) async {
-    /* States:
-    0: Playing
-    1: Paused
-    2: Stopped
-    */
-    int state = 0;
-    switch (request.state.playing) {
-      case true:
-        state = 0; // Playing
-        break;
-      case false:
-        state = 1; // Paused
-        break;
+    /* States: 0 playing, 1 paused, 2 stopped, 3 loading/buffering */
+    final s = request.state;
+    int state;
+    if (s.processingState == AudioProcessingStateMessage.idle && !s.playing) {
+      state = 1;
+    } else if (s.playing &&
+        (s.processingState == AudioProcessingStateMessage.loading ||
+            s.processingState == AudioProcessingStateMessage.buffering)) {
+      state = 3;
+    } else {
+      state = s.playing ? 0 : 1;
     }
-    await methodChannel.invokeMethod('updateState', {'state': state});
+
+    // Current position = last reported position + elapsed time * speed.
+    var positionMs = s.updatePosition.inMilliseconds;
+    if (s.playing && s.processingState == AudioProcessingStateMessage.ready) {
+      final elapsed = DateTime.now().difference(s.updateTime).inMilliseconds;
+      if (elapsed > 0) positionMs += (elapsed * s.speed).round();
+    }
+    if (_durationMs > 0 && positionMs > _durationMs) positionMs = _durationMs;
+    if (positionMs < 0) positionMs = 0;
+
+    final actions = s.systemActions;
+    final controls = s.controls.map((c) => c.action).toSet();
+    await methodChannel.invokeMethod('updateState', {
+      'state': state,
+      'positionMs': positionMs,
+      'durationMs': _durationMs,
+      'speed': s.speed,
+      'canPlay': true,
+      'canPause': true,
+      'canNext': controls.contains(MediaActionMessage.skipToNext),
+      'canPrevious': controls.contains(MediaActionMessage.skipToPrevious),
+      'canStop': controls.contains(MediaActionMessage.stop),
+      'canFastForward': controls.contains(MediaActionMessage.fastForward) ||
+          actions.contains(MediaActionMessage.fastForward),
+      'canRewind': controls.contains(MediaActionMessage.rewind) ||
+          actions.contains(MediaActionMessage.rewind),
+    });
   }
 
   @override
@@ -68,12 +98,16 @@ class AudioServiceWin extends AudioServicePlatform {
 
   @override
   Future<void> stopService(StopServiceRequest request) async {
+    _durationMs = 0;
     await methodChannel.invokeMethod('updateState', {'state': 2});
   }
 
   Future<void> _setupMethodCallHandler() async {
     methodChannel.setMethodCallHandler((call) async {
-      if (call.method == 'onSMTCButtonPressed') {
+      if (call.method == 'onSMTCSeek') {
+        final ms = (call.arguments as num).toInt();
+        _handlerCallbacks?.seek(SeekRequest(position: Duration(milliseconds: ms)));
+      } else if (call.method == 'onSMTCButtonPressed') {
         final button = call.arguments;
         log('SMTC Button Pressed: $button', name: 'audio_service_win');
 
