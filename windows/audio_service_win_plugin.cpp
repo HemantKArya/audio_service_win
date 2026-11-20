@@ -377,7 +377,7 @@ namespace audio_service_win
                   std::lock_guard<std::mutex> lock(updaterMutex);
                   if (gen == metadataGeneration.load()) updater.Update();
               } catch (const winrt::hresult_error& e) {
-                  std::cerr << "Failed to set thumbnail: " << e.message().c_str() << std::endl;
+                  std::cerr << "Failed to set thumbnail: " << winrt::to_string(e.message()) << std::endl;
               } })
                   .detach();
             }
